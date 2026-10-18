@@ -1,0 +1,230 @@
+/* SPECTER // phosphor green on black, fsociety red accents */
+
+Screen {
+    background: #000000;
+    color: #00ff41;
+}
+
+* {
+    scrollbar-background: #000000;
+    scrollbar-color: #00561a;
+    scrollbar-color-hover: #00ff41;
+    scrollbar-color-active: #ff0033;
+    scrollbar-size-vertical: 1;
+}
+
+Center {
+    height: auto;
+}
+
+#banner {
+    width: auto;
+    padding-top: 1;
+}
+
+#credit {
+    width: 100%;
+    height: 1;
+    text-align: center;
+}
+
+#tagline {
+    width: 100%;
+    height: 1;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+/* ---------------------------------------------------------- command bar */
+
+#command {
+    height: 3;
+    padding: 0 1;
+}
+
+#prompt {
+    width: auto;
+    height: 3;
+    content-align: left middle;
+    color: #ff0033;
+    text-style: bold;
+    padding-right: 1;
+}
+
+#target {
+    width: 1fr;
+}
+
+Input {
+    background: #000000;
+    color: #00ff41;
+    border: tall #00a82d;
+}
+
+Input:focus {
+    border: tall #ff0033;
+}
+
+Input > .input--placeholder {
+    color: #00561a;
+}
+
+Input > .input--cursor {
+    background: #00ff41;
+    color: #000000;
+}
+
+Button {
+    min-width: 12;
+    background: #001a00;
+    color: #00ff41;
+    border: tall #00ff41;
+    text-style: bold;
+}
+
+Button:hover {
+    background: #ff0033;
+    color: #000000;
+    border: tall #ff0033;
+}
+
+Button:focus {
+    text-style: bold reverse;
+}
+
+#execute {
+    margin-left: 1;
+}
+
+#status {
+    height: 1;
+    margin-top: 1;
+    padding: 0 1;
+    background: #001a00;
+}
+
+/* --------------------------------------------------------------- panels */
+
+#main {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#results {
+    width: 2fr;
+    height: 1fr;
+    border: round #00561a;
+    border-title-color: #ff0033;
+    border-title-style: bold;
+}
+
+#results ContentSwitcher,
+#results TabPane {
+    height: 1fr;
+    padding: 0;
+}
+
+#opslog {
+    width: 1fr;
+    min-width: 34;
+    height: 1fr;
+    background: #000000;
+    border: round #00561a;
+    border-title-color: #ff0033;
+    border-title-style: bold;
+    padding: 0 1;
+}
+
+#wellknown {
+    background: #000000;
+    padding: 0 1;
+}
+
+Tabs {
+    background: #000000;
+}
+
+Tab {
+    color: #00561a;
+}
+
+Tab.-active {
+    color: #00ff41;
+    text-style: bold;
+}
+
+Tab:hover {
+    color: #ff0033;
+}
+
+Underline > .underline--bar {
+    color: #ff0033;
+    background: #001a00;
+}
+
+DataTable {
+    height: 1fr;
+    background: #000000;
+    color: #00ff41;
+}
+
+DataTable > .datatable--header {
+    background: #001a00;
+    color: #ff0033;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: #00ff41;
+    color: #000000;
+}
+
+DataTable > .datatable--hover {
+    background: #002a0a;
+}
+
+Footer {
+    background: #001a00;
+}
+
+/* ------------------------------------------------------- scope gate */
+
+AuthGate {
+    align: center middle;
+    background: #000000 85%;
+}
+
+#gate {
+    width: 66;
+    height: auto;
+    padding: 1 2;
+    background: #050505;
+    border: heavy #ff0033;
+}
+
+#gate-title {
+    width: 100%;
+    text-align: center;
+    color: #ff0033;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#gate-body {
+    margin-bottom: 1;
+}
+
+#gate-buttons {
+    height: auto;
+    align: center middle;
+}
+
+#gate-buttons Button {
+    margin: 0 2;
+}
+
+#gate-yes {
+    border: tall #ff0033;
+    color: #ff0033;
+    background: #1a0005;
+}

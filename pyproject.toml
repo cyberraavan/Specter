@@ -1,0 +1,25 @@
+[project]
+name = "specter-recon"
+version = "0.1.0"
+description = "Passive recon console for authorized red team engagements"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "CyberRaavan" }]
+dependencies = [
+    "textual>=0.86",
+    "httpx>=0.27",
+    "dnspython>=2.6",
+]
+
+[project.scripts]
+specter = "specter.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["specter"]
+
+[tool.setuptools.package-data]
+specter = ["*.tcss"]
