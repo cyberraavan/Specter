@@ -14,7 +14,6 @@ NOTABLE = {
     "remote", "citrix", "jenkins", "ci", "git", "gitlab", "jira", "confluence",
     "grafana", "kibana", "prometheus", "sso", "auth", "login", "portal", "old",
     "legacy", "backup", "bak", "db", "sql", "phpmyadmin", "webmail", "owa", "exchange",
-    "api", "graphql", "gateway", "swagger", "rest",
 }
 
 # Hostname tokens that point at API surface specifically.

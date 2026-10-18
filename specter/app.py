@@ -487,7 +487,8 @@ class Specter(App):
         rows = []
         for index, entry in enumerate(data, 1):
             host = entry["hostname"]
-            style = f"bold {RED}" if signals.is_notable(host, self.current_target) else GREEN
+            notable = signals.is_notable(host, self.current_target) or signals.is_api_host(host, self.current_target)
+            style = f"bold {RED}" if notable else GREEN
             rows.append((str(index), Text(host, style=style), str(entry["certs"])))
         self._fill("ct", rows or [("--", "no certificates found", "")])
 

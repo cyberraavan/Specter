@@ -23,17 +23,45 @@ It runs in your terminal as a full-screen app built with
 
 ---
 
-## Quick start on Linux (Kali, Ubuntu, Debian)
+## Table of contents
 
-Kali and newer Debian-based systems block a global `pip install`. These
-scripts install SPECTER inside its own virtual environment, so nothing touches
-your system Python.
+1. [Installation](#installation)
+2. [Authorized use only](#authorized-use-only)
+3. [What it does](#what-it-does)
+4. [How it works](#how-it-works)
+5. [Usage](#usage)
+6. [The screen](#the-screen)
+7. [Modules in detail](#modules-in-detail)
+8. [Signals reference](#signals-reference)
+9. [Reports](#reports)
+10. [Troubleshooting](#troubleshooting)
+11. [Project layout](#project-layout)
+12. [Extending SPECTER](#extending-specter)
 
-**Script 1: install.** Copy the whole block, paste it in a terminal, and press Enter.
+---
+
+## Installation
+
+You need **Python 3.10 or newer**. The dependencies, `textual`, `httpx` and
+`dnspython`, are installed automatically.
+
+> **Private repository.** If this repository is private, `git clone` asks for
+> a GitHub login and fails without one. Run `gh auth login` first, or ask the
+> owner for access. Public repositories need no login.
+
+### Linux (Kali, Ubuntu, Debian)
+
+Kali and newer Debian-based systems block a global `pip install` with
+`externally-managed-environment`. This script installs SPECTER inside its own
+virtual environment, so your system Python is not touched.
+
+**Script 1: install.** Copy the whole block, paste it in a terminal, and press
+Enter. It is safe to run again: if `~/Specter` already exists, it updates it
+instead of failing.
 
 ```bash
 sudo apt update && sudo apt install -y git python3 python3-venv python3-pip && \
-git clone https://github.com/cyberraavan/Specter.git ~/Specter && \
+if [ -d ~/Specter/.git ]; then git -C ~/Specter pull; else git clone https://github.com/cyberraavan/Specter.git ~/Specter; fi && \
 cd ~/Specter && \
 python3 -m venv venv && \
 ./venv/bin/pip install --upgrade pip && \
@@ -57,11 +85,7 @@ specter example.com
 You do not need to activate the virtual environment. The `specter` command
 points straight into it.
 
-**Update to the latest version:**
-
-```bash
-cd ~/Specter && git pull && ./venv/bin/pip install -e .
-```
+**Update:** run Script 1 again.
 
 **Uninstall:**
 
@@ -69,22 +93,32 @@ cd ~/Specter && git pull && ./venv/bin/pip install -e .
 sudo rm -f /usr/local/bin/specter && rm -rf ~/Specter
 ```
 
----
+### Windows (PowerShell)
 
-## Table of contents
+```powershell
+git clone https://github.com/cyberraavan/Specter.git
+cd Specter
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -e .
+specter
+```
 
-1. [Authorized use only](#authorized-use-only)
-2. [What it does](#what-it-does)
-3. [How it works](#how-it-works)
-4. [Installation](#installation)
-5. [Usage](#usage)
-6. [The screen](#the-screen)
-7. [Modules in detail](#modules-in-detail)
-8. [Signals reference](#signals-reference)
-9. [Reports](#reports)
-10. [Troubleshooting](#troubleshooting)
-11. [Project layout](#project-layout)
-12. [Extending SPECTER](#extending-specter)
+If PowerShell blocks the activate script, run this once, then try again:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+### macOS and other Linux systems
+
+```sh
+git clone https://github.com/cyberraavan/Specter.git ~/Specter
+cd ~/Specter
+python3 -m venv venv
+./venv/bin/pip install -e .
+./venv/bin/specter
+```
 
 ---
 
@@ -173,58 +207,6 @@ Step by step:
 
 ---
 
-## Installation
-
-You need **Python 3.10 or newer** and `pip`.
-
-Dependencies, installed automatically:
-
-- `textual` 0.86 or newer, for the terminal UI
-- `httpx` 0.27 or newer, for HTTP requests
-- `dnspython` 2.6 or newer, for DNS lookups
-
-### Windows (PowerShell)
-
-```powershell
-git clone https://github.com/cyberraavan/Specter.git
-cd Specter
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e .
-```
-
-If PowerShell blocks the activate script, run this once:
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-
-### Linux and macOS
-
-On Kali, Ubuntu or Debian, use the two scripts in
-[Quick start on Linux](#quick-start-on-linux-kali-ubuntu-debian).
-
-Manual steps, for any Linux or macOS:
-
-```sh
-git clone https://github.com/cyberraavan/Specter.git
-cd Specter
-python3 -m venv venv
-source venv/bin/activate
-pip install -e .
-```
-
-If `python3 -m venv` fails on Debian-based systems, install the venv package
-first with `sudo apt install python3-venv`.
-
-### Check the install
-
-```sh
-specter --help
-```
-
----
-
 ## Usage
 
 ### Start it
@@ -273,9 +255,10 @@ box-drawing characters, such as Windows Terminal with Cascadia Mono.
 ├──────────────────────────────────────────────────────────────┤
 │  [ target domain .............................. ] [EXECUTE]  │
 ├──────────────────────────────────────────────────────────────┤
-│  module status: DNS  RDAP  TLS  HTTP  CT-LOGS  WELL-KNOWN    │
+│  status: DNS  RDAP  TLS  HTTP  CT-LOGS  WELL-KNOWN  API      │
 ├──────────────── INTEL ───────────────────────────────────────┤
-│  SIGNALS | DNS | RDAP | TLS | HTTP | CT-LOGS | WELL-KNOWN    │
+│  SIGNALS | DNS | RDAP | TLS | HTTP | CT-LOGS | WELL-KNOWN |  │
+│  API                                                         │
 │                                                              │
 │  SEV     SIGNAL                         DETAIL               │
 │  HIGH    ...                                                 │
@@ -390,7 +373,8 @@ fails, the others still report, and the failure shows as an ERROR row.
   contacted for this check.
 
 Hostnames such as `api.`, `graphql.`, `gateway.` and `developer.` in the
-CT-LOGS results are also counted as API surface and shown in red.
+CT-LOGS results are counted as API surface. They are shown in red in the
+CT-LOGS tab and reported once, as API hostnames, in SIGNALS.
 
 The API tab shows at most 300 rows. The saved report has the full list.
 
@@ -412,26 +396,26 @@ The API tab shows at most 300 rows. The saved report has the full list.
 | MEDIUM   | HTTPS failed, fell back to HTTP              | site may not support TLS properly                   |
 | MEDIUM   | Site served over plain HTTP                  | traffic can be read or changed in transit           |
 | MEDIUM   | No HSTS header                               | first visit can be downgraded to HTTP               |
+| MEDIUM   | Public API specification exposed             | full endpoint map is readable by anyone             |
+| MEDIUM   | Interactive API docs exposed                 | Swagger UI or similar lets anyone try requests      |
+| MEDIUM   | GraphQL IDE reachable                        | GraphiQL or Playground is open to the internet      |
 | LOW      | SPF soft-fails (`~all`)                      | spoofed mail is marked, not rejected                |
 | LOW      | DMARC is monitor-only (`p=none`)             | DMARC reports but does not block                    |
 | LOW      | Missing security headers                     | CSP, X-Frame-Options and similar are absent         |
 | LOW      | Server banner discloses version              | helps match the server to known CVEs                |
 | LOW      | X-Powered-By discloses stack                 | reveals backend language or framework               |
 | LOW      | Notable hostnames exposed via CT logs        | dev, staging or admin surface is public knowledge   |
+| LOW      | GraphQL endpoint reachable                   | worth checking whether introspection is enabled     |
+| LOW      | API spec declares no auth scheme             | endpoints may be callable without credentials       |
+| LOW      | OIDC dynamic client registration advertised  | anyone may be able to register an OAuth client      |
 | INFO     | DMARC enforced                               | good posture, shown for context                     |
 | INFO     | No CAA record                                | any public CA may issue certificates                |
 | INFO     | No MX records                                | domain does not receive mail directly               |
 | INFO     | DNSSEC not enabled                           | delegation is unsigned                              |
 | INFO     | Technology fingerprint                       | detected CDN, CMS and framework                     |
 | INFO     | Hostnames in CT logs                         | total count, see the CT-LOGS tab                    |
-| INFO     | security.txt published or missing           | disclosure contact, or the lack of one              |
+| INFO     | security.txt published or missing            | disclosure contact, or the lack of one              |
 | INFO     | robots.txt disallowed paths                  | paths the owner does not want indexed               |
-| MEDIUM   | Public API specification exposed             | full endpoint map is readable by anyone             |
-| MEDIUM   | Interactive API docs exposed                 | Swagger UI or similar lets anyone try requests      |
-| MEDIUM   | GraphQL IDE reachable                        | GraphiQL or Playground is open to the internet      |
-| LOW      | GraphQL endpoint reachable                   | worth checking whether introspection is enabled     |
-| LOW      | API spec declares no auth scheme             | endpoints may be callable without credentials       |
-| LOW      | OIDC dynamic client registration advertised  | anyone may be able to register an OAuth client      |
 | INFO     | OpenID Connect provider published            | issuer and auth endpoints, shown for context        |
 | INFO     | API hostnames in CT logs                     | `api.`, `gateway.` and similar subdomains           |
 | INFO     | API paths referenced in page JavaScript      | endpoints the frontend calls                        |
@@ -477,19 +461,20 @@ by accident.
 
 ## Troubleshooting
 
-| Problem                                    | Fix                                                               |
-|--------------------------------------------|-------------------------------------------------------------------|
-| `specter` is not recognized                | activate the virtual environment, or run `python -m specter`      |
-| `error: externally-managed-environment`    | use the Linux install script, which uses a virtual environment    |
-| `git clone` asks for a username            | the repo is private. Log in with `gh auth login` or ask for access |
-| API shows `wayback: ReadTimeout`           | the Wayback Machine is slow. Run the sweep again later            |
-| CT-LOGS fails or times out                 | crt.sh is overloaded. Run the sweep again in a few minutes        |
-| RDAP says "no RDAP record found"           | the TLD does not offer RDAP. Use a normal WHOIS tool for it       |
-| DNS says NXDOMAIN                          | check the spelling. The domain does not exist                     |
-| TLS fails with `CERTIFICATE_VERIFY_FAILED` | that is a real finding, shown as a HIGH signal                    |
-| Banner looks broken or shows `?`           | use Windows Terminal or another UTF-8 terminal with a modern font |
-| Colours look wrong                         | use a dark terminal theme with true colour support                |
-| "is not a valid domain name"               | SPECTER takes domains only, not IP addresses                      |
+| Problem                                    | Fix                                                                 |
+|--------------------------------------------|---------------------------------------------------------------------|
+| `specter` is not recognized                | run Script 1 again, or use `~/Specter/venv/bin/specter`             |
+| `error: externally-managed-environment`    | use the Linux install script, which uses a virtual environment      |
+| `git clone` asks for a username            | the repo is private. Log in with `gh auth login` or ask for access  |
+| `python3 -m venv` fails                    | install the venv package with `sudo apt install python3-venv`       |
+| API shows `wayback: ReadTimeout`           | the Wayback Machine is slow. Run the sweep again later              |
+| CT-LOGS fails or times out                 | crt.sh is overloaded. Run the sweep again in a few minutes          |
+| RDAP says "no RDAP record found"           | the TLD does not offer RDAP. Use a normal WHOIS tool for it         |
+| DNS says NXDOMAIN                          | check the spelling. The domain does not exist                       |
+| TLS fails with `CERTIFICATE_VERIFY_FAILED` | that is a real finding, shown as a HIGH signal                      |
+| Banner looks broken or shows `?`           | use Windows Terminal or another UTF-8 terminal with a modern font   |
+| Colours look wrong                         | use a dark terminal theme with true colour support                  |
+| "is not a valid domain name"               | SPECTER takes domains only, not IP addresses                        |
 
 ---
 
