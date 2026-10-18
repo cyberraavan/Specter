@@ -510,14 +510,16 @@ class Specter(App):
         rows = []
         for spec in data.get("specs") or []:
             title = " ".join(filter(None, (spec["title"], spec["api_version"]))) or "untitled"
-            rows.append((Text("SPEC", style=hot), Text(spec["path"], style=hot), f"{title} / OpenAPI {spec['spec_version']}"))
+            detail = f"{title} / OpenAPI {spec['spec_version']}"
+            rows.append((Text("SPEC", style=hot), Text(spec["path"], style=hot), detail))
             rows += [("SPEC", "server", url) for url in spec["servers"]]
             rows.append(("SPEC", "auth", ", ".join(spec["auth"]) or Text("no security schemes declared", style=AMBER)))
             rows += [("ENDPOINT", f"{e['method']} {e['path']}", e["summary"]) for e in spec["endpoints"]]
         for ui in data.get("docs_ui") or []:
             rows.append((Text("DOCS-UI", style=hot), Text(ui["path"], style=hot), f"{ui['kind']} at {ui['final_url']}"))
         for gql in data.get("graphql") or []:
-            rows.append((Text("GRAPHQL", style=hot), Text(gql["path"], style=hot), f"{gql['kind']} (HTTP {gql['status']})"))
+            detail = f"{gql['kind']} (HTTP {gql['status']})"
+            rows.append((Text("GRAPHQL", style=hot), Text(gql["path"], style=hot), detail))
         if oidc := data.get("oidc"):
             rows += [("OIDC", key, str(value)) for key, value in oidc.items() if key != "grant_types"]
             if oidc.get("grant_types"):

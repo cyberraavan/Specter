@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Passive recon console for authorized red team engagements"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "Proprietary. All rights reserved." }
 authors = [{ name = "CyberRaavan" }]
 dependencies = [
     "textual>=0.86",
@@ -23,3 +24,10 @@ packages = ["specter"]
 
 [tool.setuptools.package-data]
 specter = ["*.tcss"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "I"]

@@ -37,6 +37,7 @@ It runs in your terminal as a full-screen app built with
 10. [Troubleshooting](#troubleshooting)
 11. [Project layout](#project-layout)
 12. [Extending SPECTER](#extending-specter)
+13. [License](#license)
 
 ---
 
@@ -95,19 +96,51 @@ sudo rm -f /usr/local/bin/specter && rm -rf ~/Specter
 
 ### Windows (PowerShell)
 
+You need Git and Python 3.10 or newer. If either is missing, install them
+first, then open a new PowerShell window:
+
 ```powershell
-git clone https://github.com/cyberraavan/Specter.git
-cd Specter
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -e .
+winget install -e --id Git.Git
+winget install -e --id Python.Python.3.12
+```
+
+**Script 1: install.** Copy the whole block, paste it in PowerShell, and
+press Enter. It is safe to run again: an existing install is updated.
+
+```powershell
+$dir = "$HOME\Specter"
+$env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+if (Test-Path "$dir\.git") { git -C $dir pull } else { git clone https://github.com/cyberraavan/Specter.git $dir }
+if ($LASTEXITCODE) { throw "git step failed" }
+python -m venv "$dir\venv"
+if ($LASTEXITCODE) { throw "could not create the virtual environment" }
+& "$dir\venv\Scripts\python.exe" -m pip install --upgrade pip
+& "$dir\venv\Scripts\python.exe" -m pip install -e $dir
+if ($LASTEXITCODE) { throw "pip install failed" }
+New-Item -ItemType Directory -Force "$dir\bin" | Out-Null
+Set-Content -Encoding ascii "$dir\bin\specter.cmd" "@`"$dir\venv\Scripts\specter.exe`" %*"
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ("$userPath" -notlike "*$dir\bin*") { [Environment]::SetEnvironmentVariable("Path", ("$userPath;$dir\bin").TrimStart(";"), "User") }
+Write-Host "SPECTER installed. Open a new terminal and run: specter"
+```
+
+**Script 2: run.** Open a **new** PowerShell or Windows Terminal window, then run:
+
+```powershell
 specter
 ```
 
-If PowerShell blocks the activate script, run this once, then try again:
+The script does not activate the virtual environment, so PowerShell's
+script execution policy does not get in the way. It adds only the small
+`Specter\bin` folder to your user PATH, not the virtual environment's Python.
+
+**Uninstall:**
 
 ```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+$dir = "$HOME\Specter"
+$p = ([Environment]::GetEnvironmentVariable("Path", "User") -split ";" | Where-Object { $_ -and $_ -ne "$dir\bin" }) -join ";"
+[Environment]::SetEnvironmentVariable("Path", $p, "User")
+Remove-Item -Recurse -Force $dir
 ```
 
 ### macOS and other Linux systems
@@ -482,8 +515,12 @@ by accident.
 
 ```
 Specter/
-  pyproject.toml     package metadata, dependencies, `specter` command
+  pyproject.toml     package metadata, dependencies, `specter` command, ruff settings
   README.md          this file
+  LICENSE            proprietary license, all rights reserved
+  .github/
+    workflows/
+      ci.yml         lint, compile and smoke test on every push
   specter/
     __init__.py      version and author
     __main__.py      command-line entry point (argparse)
@@ -511,6 +548,17 @@ check there. Severity must be `high`, `medium`, `low` or `info`.
 **Add a module.** Write an async function in `recon.py`, add it to the `jobs`
 dict in `run_scan` in `app.py`, add its name to `MODULES` and
 `MODULE_LABELS`, add a tab, and write a `_render_<name>` method.
+
+---
+
+## License
+
+Copyright (c) 2026 CyberRaavan. **All rights reserved.**
+
+SPECTER is proprietary software. You may view the code, but you may not copy,
+modify, redistribute, sell, or host it, or use it to train or build any AI or
+machine learning model or dataset, without written permission from
+CyberRaavan. See [LICENSE](LICENSE) for the full terms.
 
 ---
 

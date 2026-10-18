@@ -106,7 +106,7 @@ async def dns_records(domain: str) -> dict:
         *(query(domain, rtype) for rtype in RECORD_TYPES),
         query(f"_dmarc.{domain}", "TXT"),
     )
-    records = dict(zip(RECORD_TYPES, values[:-1]))
+    records = dict(zip(RECORD_TYPES, values[:-1], strict=True))
     records["TXT"] = [_join_txt(v) for v in records["TXT"]]
     return {"records": records, "dmarc": [_join_txt(v) for v in values[-1]]}
 
@@ -518,7 +518,9 @@ async def _probe_graphql(client: httpx.AsyncClient, base: str) -> list[dict]:
         kind = None
         if any(marker in lowered for marker in GRAPHQL_IDE_MARKERS):
             kind = "GraphQL IDE"
-        elif "<html" not in lowered and ("must provide query" in lowered or "graphql" in lowered and "query" in lowered):
+        elif "<html" not in lowered and (
+            "must provide query" in lowered or ("graphql" in lowered and "query" in lowered)
+        ):
             kind = "GraphQL endpoint"
         else:
             with contextlib.suppress(ValueError):
@@ -573,7 +575,7 @@ async def _scan_javascript(client: httpx.AsyncClient, base: str, domain: str) ->
     for src in _SCRIPT_SRC.findall(page):
         url = str(httpx.URL(page_url).join(html.unescape(src)))
         host = urlsplit(url).hostname or ""
-        same_site = host == page_host or host == domain or host.endswith("." + domain)
+        same_site = host in (page_host, domain) or host.endswith("." + domain)
         if same_site and url not in scripts:
             scripts.append(url)
     scripts = scripts[:MAX_SCRIPTS]
@@ -633,7 +635,7 @@ async def api_recon(client: httpx.AsyncClient, domain: str) -> dict:
     }
     results = await asyncio.gather(*checks.values(), return_exceptions=True)
     out: dict = {"errors": {}}
-    for name, value in zip(checks, results):
+    for name, value in zip(checks, results, strict=True):
         if isinstance(value, asyncio.CancelledError):
             raise value
         if isinstance(value, BaseException):
