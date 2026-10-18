@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
+import json
 import re
 import ssl
 from collections import Counter
@@ -380,3 +381,266 @@ async def well_known(client: httpx.AsyncClient, domain: str) -> dict:
             entry["error"] = str(exc) or exc.__class__.__name__
         found[path] = entry
     return found
+
+
+# --------------------------------------------------------------------- API
+
+SPEC_PATHS = (
+    "/openapi.json",
+    "/swagger.json",
+    "/api/openapi.json",
+    "/api/swagger.json",
+    "/v2/api-docs",
+    "/v3/api-docs",
+    "/api-docs",
+    "/swagger/v1/swagger.json",
+    "/v2/swagger.json",
+    "/api/v3/openapi.json",
+)
+DOCS_UI_PATHS = ("/", "/swagger-ui.html", "/swagger-ui/", "/docs", "/redoc", "/api/docs")
+# Markers are library asset names or tags, not plain words, so a page that only
+# mentions "swagger-ui" in its text does not count.
+DOCS_UI_MARKERS = (
+    ("swagger-ui-bundle", "Swagger UI"),
+    ("swaggeruibundle", "Swagger UI"),
+    ("redoc.standalone", "ReDoc"),
+    ("<redoc", "ReDoc"),
+    ("<rapi-doc", "RapiDoc"),
+    ("@scalar/api-reference", "Scalar"),
+)
+GRAPHQL_IDE_MARKERS = (
+    "graphiql.min.js",
+    "graphiql.min.css",
+    "graphiql.css",
+    "graphqlplayground.init",
+    "graphql-playground-react",
+    "embeddable-sandbox",
+)
+_API_HINT = re.compile(r"/api/|/v[0-9]+/|graphql|swagger|openapi|api-docs", re.I)
+GRAPHQL_PATHS = ("/graphql", "/api/graphql")
+OIDC_PATH = "/.well-known/openid-configuration"
+SPEC_LIMIT = 2 * 1024 * 1024
+JS_LIMIT = 1024 * 1024
+MAX_SCRIPTS = 5
+HTTP_METHODS = ("get", "post", "put", "patch", "delete", "head", "options")
+STATIC_EXT = (".png", ".jpg", ".jpeg", ".gif", ".css", ".svg", ".ico", ".woff", ".woff2", ".ttf")
+
+_API_PATH = re.compile(
+    r"""["'`]((?:https?://[a-z0-9.\-]+)?/(?:api|graphql|rest|v[0-9]{1,2})(?:/[^"'`\s<>(){}\\]*)?)["'`]""",
+    re.I,
+)
+_SCRIPT_SRC = re.compile(r"""<script[^>]+src=["']([^"']+)["']""", re.I)
+_WAYBACK_FILTER = r"original:.*(/api/|/v[0-9]+/|graphql|swagger|openapi|api-docs).*"
+
+
+async def _get_text(client: httpx.AsyncClient, url: str, limit: int) -> tuple[httpx.Response, str]:
+    async with client.stream("GET", url) as response:
+        body = await _read_capped(response, limit)
+    return response, body
+
+
+def _parse_spec(data: dict) -> dict | None:
+    version = data.get("openapi") or data.get("swagger")
+    if not version or not isinstance(data.get("paths"), dict):
+        return None
+    info = data.get("info") or {}
+    endpoints = []
+    for path, ops in data["paths"].items():
+        if not isinstance(ops, dict):
+            continue
+        for method in HTTP_METHODS:
+            if method in ops:
+                op = ops[method] if isinstance(ops[method], dict) else {}
+                endpoints.append(
+                    {"method": method.upper(), "path": path, "summary": str(op.get("summary") or "")[:80]}
+                )
+    schemes = (data.get("components") or {}).get("securitySchemes") or data.get("securityDefinitions") or {}
+    servers = [s.get("url") for s in data.get("servers", []) if isinstance(s, dict) and s.get("url")]
+    if data.get("host"):
+        servers.append(f"{data['host']}{data.get('basePath', '')}")
+    return {
+        "spec_version": str(version),
+        "title": info.get("title"),
+        "api_version": info.get("version"),
+        "servers": servers,
+        "auth": sorted(f"{name} ({(s or {}).get('type', '?')})" for name, s in schemes.items()),
+        "endpoints": endpoints,
+    }
+
+
+async def _probe_specs(client: httpx.AsyncClient, base: str) -> list[dict]:
+    found = []
+    for path in SPEC_PATHS:
+        try:
+            response, body = await _get_text(client, base + path, SPEC_LIMIT)
+        except httpx.HTTPError:
+            continue
+        if response.status_code != 200:
+            continue
+        try:
+            data = json.loads(body)
+        except ValueError:
+            continue
+        spec = _parse_spec(data) if isinstance(data, dict) else None
+        if spec:
+            spec["path"] = path
+            found.append(spec)
+    return found
+
+
+async def _probe_docs_ui(client: httpx.AsyncClient, base: str) -> list[dict]:
+    found = []
+    for path in DOCS_UI_PATHS:
+        try:
+            response, body = await _get_text(client, base + path, BODY_LIMIT)
+        except httpx.HTTPError:
+            continue
+        if response.status_code != 200:
+            continue
+        lowered = body.lower()
+        for marker, name in DOCS_UI_MARKERS:
+            if marker in lowered:
+                found.append({"path": path, "kind": name, "final_url": str(response.url)})
+                break
+    return found
+
+
+async def _probe_graphql(client: httpx.AsyncClient, base: str) -> list[dict]:
+    found = []
+    for path in GRAPHQL_PATHS:
+        try:
+            response, body = await _get_text(client, base + path, BODY_LIMIT)
+        except httpx.HTTPError:
+            continue
+        if response.status_code == 404:
+            continue
+        lowered = body.lower()
+        kind = None
+        if any(marker in lowered for marker in GRAPHQL_IDE_MARKERS):
+            kind = "GraphQL IDE"
+        elif "<html" not in lowered and ("must provide query" in lowered or "graphql" in lowered and "query" in lowered):
+            kind = "GraphQL endpoint"
+        else:
+            with contextlib.suppress(ValueError):
+                data = json.loads(body)
+                if isinstance(data, dict) and isinstance(data.get("errors"), list):
+                    kind = "GraphQL endpoint"
+        if kind:
+            found.append({"path": path, "kind": kind, "status": response.status_code})
+    return found
+
+
+async def _probe_oidc(client: httpx.AsyncClient, base: str) -> dict | None:
+    try:
+        response, body = await _get_text(client, base + OIDC_PATH, BODY_LIMIT)
+        data = json.loads(body) if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return None
+    if not (isinstance(data, dict) and data.get("issuer") and data.get("authorization_endpoint")):
+        return None
+    keys = (
+        "issuer",
+        "authorization_endpoint",
+        "token_endpoint",
+        "userinfo_endpoint",
+        "jwks_uri",
+        "registration_endpoint",
+    )
+    out = {key: data[key] for key in keys if data.get(key)}
+    out["grant_types"] = data.get("grant_types_supported") or []
+    return out
+
+
+def _api_paths(text: str, domain: str) -> set[str]:
+    out = set()
+    for match in _API_PATH.findall(text):
+        url = match.rstrip(".,;")
+        if url.startswith("http"):
+            host = (urlsplit(url).hostname or "").lower()
+            if host != domain and not host.endswith("." + domain):
+                continue
+        if len(url) <= 200 and not url.lower().endswith(STATIC_EXT):
+            out.add(url)
+    return out
+
+
+async def _scan_javascript(client: httpx.AsyncClient, base: str, domain: str) -> dict:
+    response, page = await _get_text(client, base + "/", BODY_LIMIT)
+    page_url = str(response.url)
+    page_host = urlsplit(page_url).hostname or ""
+    paths = {p: "homepage" for p in _api_paths(page, domain)}
+    scripts: list[str] = []
+    for src in _SCRIPT_SRC.findall(page):
+        url = str(httpx.URL(page_url).join(html.unescape(src)))
+        host = urlsplit(url).hostname or ""
+        same_site = host == page_host or host == domain or host.endswith("." + domain)
+        if same_site and url not in scripts:
+            scripts.append(url)
+    scripts = scripts[:MAX_SCRIPTS]
+    for url in scripts:
+        try:
+            _, body = await _get_text(client, url, JS_LIMIT)
+        except httpx.HTTPError:
+            continue
+        name = urlsplit(url).path.rsplit("/", 1)[-1] or url
+        for path in _api_paths(body, domain):
+            paths.setdefault(path, name)
+    return {
+        "scripts": scripts,
+        "paths": [{"path": p, "source": s} for p, s in sorted(paths.items())],
+    }
+
+
+async def _wayback_api(client: httpx.AsyncClient, domain: str) -> list[str]:
+    params = {
+        "url": f"*.{domain}/*",
+        "output": "json",
+        "fl": "original",
+        "collapse": "urlkey",
+        "filter": _WAYBACK_FILTER,
+        "limit": "3000",
+    }
+    response = await client.get(
+        "https://web.archive.org/cdx/search/cdx",
+        params=params,
+        timeout=httpx.Timeout(40.0, connect=10.0),
+    )
+    response.raise_for_status()
+    try:
+        rows = response.json() if response.text.strip() else []
+    except ValueError:
+        raise RuntimeError("Wayback Machine returned a non-JSON response") from None
+    seen = set()
+    for row in rows[1:]:
+        url = str(row[0])
+        parts = urlsplit(url if "://" in url else "//" + url)
+        path = parts.path or "/"
+        if _API_HINT.search(path) and not path.lower().endswith(STATIC_EXT):
+            seen.add(f"{(parts.hostname or '').lower()}{path}")
+    return sorted(seen)
+
+
+async def api_recon(client: httpx.AsyncClient, domain: str) -> dict:
+    """Map API surface: published specs, docs UIs, GraphQL, OIDC, JS references, archived URLs."""
+    base = f"https://{domain}"
+    checks = {
+        "specs": _probe_specs(client, base),
+        "docs_ui": _probe_docs_ui(client, base),
+        "graphql": _probe_graphql(client, base),
+        "oidc": _probe_oidc(client, base),
+        "javascript": _scan_javascript(client, base, domain),
+        "wayback": _wayback_api(client, domain),
+    }
+    results = await asyncio.gather(*checks.values(), return_exceptions=True)
+    out: dict = {"errors": {}}
+    for name, value in zip(checks, results):
+        if isinstance(value, asyncio.CancelledError):
+            raise value
+        if isinstance(value, BaseException):
+            out["errors"][name] = str(value) or value.__class__.__name__
+            out[name] = None
+        else:
+            out[name] = value
+    if len(out["errors"]) == len(checks):
+        raise RuntimeError("all API checks failed: " + "; ".join(out["errors"].values()))
+    return out

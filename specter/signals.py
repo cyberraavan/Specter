@@ -14,7 +14,18 @@ NOTABLE = {
     "remote", "citrix", "jenkins", "ci", "git", "gitlab", "jira", "confluence",
     "grafana", "kibana", "prometheus", "sso", "auth", "login", "portal", "old",
     "legacy", "backup", "bak", "db", "sql", "phpmyadmin", "webmail", "owa", "exchange",
+    "api", "graphql", "gateway", "swagger", "rest",
 }
+
+# Hostname tokens that point at API surface specifically.
+API_TOKENS = {"api", "apis", "graphql", "gateway", "gw", "rest", "swagger", "openapi", "developer", "developers"}
+
+
+def is_api_host(host: str, target: str | None) -> bool:
+    sub = host
+    if target and host.endswith(target):
+        sub = host[: -len(target)].rstrip(".")
+    return any(token in API_TOKENS for token in re.split(r"[.\-_]", sub) if token)
 
 SECURITY_HEADERS_LOW = (
     "content-security-policy",
@@ -49,6 +60,7 @@ def derive(intel: dict, failures: dict, target: str | None = None) -> list[dict]
     _http(intel.get("http"), add)
     _ct(intel.get("ct"), target, add)
     _wellknown(intel.get("wellknown"), add)
+    _api(intel.get("api"), intel.get("ct"), target, add)
 
     for module, error in failures.items():
         if module == "tls" and "CERTIFICATE_VERIFY_FAILED" in error:
@@ -168,3 +180,35 @@ def _wellknown(wk: dict | None, add) -> None:
         disallowed = re.findall(r"(?im)^\s*disallow:\s*(\S+)", robots)
         if disallowed:
             add("info", f"robots.txt lists {len(disallowed)} disallowed paths", _preview(disallowed))
+
+
+def _api(api: dict | None, ct: list | None, target: str | None, add) -> None:
+    if ct:
+        hosts = [e["hostname"] for e in ct if is_api_host(e["hostname"], target)]
+        if hosts:
+            add("info", f"{len(hosts)} API hostnames in CT logs", _preview(hosts))
+    if not api:
+        return
+    for spec in api.get("specs") or []:
+        add(
+            "medium",
+            "Public API specification exposed",
+            f"{spec['path']}: {len(spec['endpoints'])} endpoints documented",
+        )
+        if not spec["auth"]:
+            add("low", "API spec declares no auth scheme", f"{spec['path']} has no securitySchemes")
+    for ui in api.get("docs_ui") or []:
+        add("medium", f"Interactive API docs exposed ({ui['kind']})", ui["final_url"])
+    for gql in api.get("graphql") or []:
+        severity = "medium" if gql["kind"] == "GraphQL IDE" else "low"
+        add(severity, f"{gql['kind']} reachable", gql["path"])
+    if oidc := api.get("oidc"):
+        add("info", "OpenID Connect provider published", oidc.get("issuer", ""))
+        if oidc.get("registration_endpoint"):
+            add("low", "OIDC dynamic client registration advertised", oidc["registration_endpoint"])
+    js_paths = [p["path"] for p in (api.get("javascript") or {}).get("paths", [])]
+    if js_paths:
+        add("info", f"{len(js_paths)} API paths referenced in page JavaScript", _preview(js_paths))
+    archived = api.get("wayback") or []
+    if archived:
+        add("info", f"{len(archived)} archived API URLs on the Wayback Machine", _preview(archived))

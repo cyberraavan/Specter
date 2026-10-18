@@ -14,12 +14,60 @@
 **Made by CyberRaavan**
 
 SPECTER is a **passive recon console** for the first hours of an **authorized**
-red team engagement or security assessment. You give it a domain. It runs six
+red team engagement or security assessment. You give it a domain. It runs seven
 intel modules at the same time, shows the raw results in tabs, and turns them
 into ranked **signals**: the findings worth looking at first.
 
 It runs in your terminal as a full-screen app built with
 [Textual](https://textual.textualize.io/).
+
+---
+
+## Quick start on Linux (Kali, Ubuntu, Debian)
+
+Kali and newer Debian-based systems block a global `pip install`. These
+scripts install SPECTER inside its own virtual environment, so nothing touches
+your system Python.
+
+**Script 1: install.** Copy the whole block, paste it in a terminal, and press Enter.
+
+```bash
+sudo apt update && sudo apt install -y git python3 python3-venv python3-pip && \
+git clone https://github.com/cyberraavan/Specter.git ~/Specter && \
+cd ~/Specter && \
+python3 -m venv venv && \
+./venv/bin/pip install --upgrade pip && \
+./venv/bin/pip install -e . && \
+sudo ln -sf ~/Specter/venv/bin/specter /usr/local/bin/specter && \
+echo "SPECTER installed. Run it with: specter"
+```
+
+**Script 2: run.** After the install prints `SPECTER installed`, run:
+
+```bash
+specter
+```
+
+Or open it with a target already filled in:
+
+```bash
+specter example.com
+```
+
+You do not need to activate the virtual environment. The `specter` command
+points straight into it.
+
+**Update to the latest version:**
+
+```bash
+cd ~/Specter && git pull && ./venv/bin/pip install -e .
+```
+
+**Uninstall:**
+
+```bash
+sudo rm -f /usr/local/bin/specter && rm -rf ~/Specter
+```
 
 ---
 
@@ -51,8 +99,10 @@ or at domains you own.
 - Pressing **ABORT** or `Esc` cancels the scan, and nothing is sent.
 
 SPECTER is low-touch by design. It does **no** port scanning, brute forcing,
-fuzzing, directory busting, or exploitation. The target sees roughly what it
-would see from one browser visit.
+fuzzing, directory busting, or exploitation. The target sees one TLS
+handshake and about 25 ordinary GET requests: the homepage, two well-known
+files, a fixed list of common API documentation paths, and up to 5 of its own
+script files.
 
 ---
 
@@ -66,6 +116,7 @@ would see from one browser visit.
 | TLS        | target, port 443         | one handshake: issuer, expiry, SANs, protocol     |
 | HTTP       | target                   | one GET of `/`: headers, title, tech fingerprint  |
 | WELL-KNOWN | target                   | `/.well-known/security.txt` and `/robots.txt`     |
+| API        | target, web.archive.org  | API specs, docs UIs, GraphQL, OIDC, JS API paths, archived API URLs |
 
 Then the **signals engine** reads all of that and flags things like:
 
@@ -73,7 +124,8 @@ Then the **signals engine** reads all of that and flags things like:
 - expired or soon-expiring TLS certificates,
 - missing HSTS and other security headers,
 - version banners that leak the server stack,
-- interesting subdomains such as `dev`, `staging`, `vpn`, `jenkins`, `admin`.
+- interesting subdomains such as `dev`, `staging`, `vpn`, `jenkins`, `admin`,
+- exposed API documentation, Swagger or OpenAPI specs, and GraphQL IDEs.
 
 ---
 
@@ -89,9 +141,9 @@ Then the **signals engine** reads all of that and flags things like:
  Rules of Engagement     confirm the domain is in scope
         │  AUTHORIZED
         ▼
- ┌──────────── six modules run in parallel (asyncio) ────────────┐
- │  DNS     RDAP     TLS     HTTP     CT-LOGS     WELL-KNOWN      │
- └───────────────────────────────┬───────────────────────────────┘
+ ┌─────────────── seven modules run in parallel (asyncio) ───────────────┐
+ │  DNS    RDAP    TLS    HTTP    CT-LOGS    WELL-KNOWN    API           │
+ └───────────────────────────────────┬───────────────────────────────────┘
                                  │ each result arrives as soon as it is ready
                                  ▼
         tab is filled  +  OPS LOG line  +  SIGNALS re-ranked live
@@ -107,7 +159,7 @@ Step by step:
    converted with IDNA. IP addresses and invalid names are rejected.
 2. **Scope gate.** A modal asks you to confirm the domain is inside an
    authorized scope. Only after that does any network traffic start.
-3. **Parallel sweep.** All six modules start at once as async tasks. One
+3. **Parallel sweep.** All seven modules start at once as async tasks. One
    shared HTTP client is used, with a 10 second timeout and the user agent
    `SPECTER-recon/0.1`.
 4. **Live results.** As each module finishes, its tab is filled, the status
@@ -149,13 +201,21 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 ### Linux and macOS
 
+On Kali, Ubuntu or Debian, use the two scripts in
+[Quick start on Linux](#quick-start-on-linux-kali-ubuntu-debian).
+
+Manual steps, for any Linux or macOS:
+
 ```sh
 git clone https://github.com/cyberraavan/Specter.git
 cd Specter
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 pip install -e .
 ```
+
+If `python3 -m venv` fails on Debian-based systems, install the venv package
+first with `sudo apt install python3-venv`.
 
 ### Check the install
 
@@ -236,6 +296,7 @@ box-drawing characters, such as Windows Terminal with Cascadia Mono.
 | HTTP       | status, redirects, title, server, security headers, cookies, tech  |
 | CT-LOGS    | every hostname from crt.sh. Notable ones are shown in red          |
 | WELL-KNOWN | the contents of `security.txt` and `robots.txt`, if published      |
+| API        | specs and their endpoints, docs UIs, GraphQL, OIDC, JS and archived API paths |
 
 Severity colours: **HIGH** red, **MEDIUM** amber, **LOW** yellow-green,
 **INFO** green.
@@ -301,6 +362,38 @@ Severity colours: **HIGH** red, **MEDIUM** amber, **LOW** yellow-green,
   missing files.
 - Shows up to 6000 characters of each file.
 
+### API
+
+Maps the target's API surface. It runs six checks in parallel. If one check
+fails, the others still report, and the failure shows as an ERROR row.
+
+- **Published specs.** Sends one GET to each common OpenAPI or Swagger path,
+  such as `/openapi.json`, `/swagger.json`, `/v2/api-docs`, `/v3/api-docs`,
+  `/v2/swagger.json` and `/api/v3/openapi.json`. A response only counts if it
+  is valid JSON with an `openapi` or `swagger` field and a `paths` object.
+  SPECTER then lists every endpoint with its method and summary, the declared
+  servers, and the auth schemes.
+- **Docs UIs.** Checks `/`, `/swagger-ui.html`, `/swagger-ui/`, `/docs`,
+  `/redoc` and `/api/docs` for Swagger UI, ReDoc, RapiDoc or Scalar. It looks
+  for the library's own files or tags, not just the word, to avoid false hits.
+- **GraphQL.** Sends a plain GET to `/graphql` and `/api/graphql`. It reports
+  a GraphQL IDE such as GraphiQL, Playground or Apollo Sandbox, or a bare
+  GraphQL endpoint. It does **not** send an introspection query.
+- **OpenID Connect.** Reads `/.well-known/openid-configuration` and lists the
+  issuer, auth, token, userinfo, JWKS and registration endpoints, plus the
+  supported grant types.
+- **JavaScript.** Reads the homepage and up to 5 same-site script files, and
+  pulls out paths that start with `/api`, `/graphql`, `/rest` or `/v1` style
+  version prefixes. Links to other domains are ignored.
+- **Wayback Machine.** Asks `web.archive.org` for archived URLs of the domain
+  and its subdomains whose path looks like an API. The target is not
+  contacted for this check.
+
+Hostnames such as `api.`, `graphql.`, `gateway.` and `developer.` in the
+CT-LOGS results are also counted as API surface and shown in red.
+
+The API tab shows at most 300 rows. The saved report has the full list.
+
 ---
 
 ## Signals reference
@@ -333,6 +426,16 @@ Severity colours: **HIGH** red, **MEDIUM** amber, **LOW** yellow-green,
 | INFO     | Hostnames in CT logs                         | total count, see the CT-LOGS tab                    |
 | INFO     | security.txt published or missing           | disclosure contact, or the lack of one              |
 | INFO     | robots.txt disallowed paths                  | paths the owner does not want indexed               |
+| MEDIUM   | Public API specification exposed             | full endpoint map is readable by anyone             |
+| MEDIUM   | Interactive API docs exposed                 | Swagger UI or similar lets anyone try requests      |
+| MEDIUM   | GraphQL IDE reachable                        | GraphiQL or Playground is open to the internet      |
+| LOW      | GraphQL endpoint reachable                   | worth checking whether introspection is enabled     |
+| LOW      | API spec declares no auth scheme             | endpoints may be callable without credentials       |
+| LOW      | OIDC dynamic client registration advertised  | anyone may be able to register an OAuth client      |
+| INFO     | OpenID Connect provider published            | issuer and auth endpoints, shown for context        |
+| INFO     | API hostnames in CT logs                     | `api.`, `gateway.` and similar subdomains           |
+| INFO     | API paths referenced in page JavaScript      | endpoints the frontend calls                        |
+| INFO     | Archived API URLs on the Wayback Machine     | old or forgotten endpoints that may still work      |
 | INFO     | Module failed                                | a module errored, with the reason                   |
 
 ---
@@ -350,7 +453,8 @@ reports/
 
 The **Markdown** report contains scan times, the signals table, all DNS
 records, RDAP and TLS details, HTTP headers with a security-header table, the
-CT hostname list, the well-known files, and any module failures.
+CT hostname list, the well-known files, the full API surface with every
+endpoint and archived URL, and any module failures.
 
 The **JSON** file has this shape:
 
@@ -361,7 +465,7 @@ The **JSON** file has this shape:
   "target": "example.com",
   "meta": { "target": "...", "started": "...", "finished": "..." },
   "signals": [ { "severity": "medium", "title": "...", "detail": "..." } ],
-  "intel": { "dns": {}, "rdap": {}, "tls": {}, "http": {}, "ct": [], "wellknown": {} },
+  "intel": { "dns": {}, "rdap": {}, "tls": {}, "http": {}, "ct": [], "wellknown": {}, "api": {} },
   "failures": { "ct": "crt.sh timed out ..." }
 }
 ```
@@ -376,6 +480,9 @@ by accident.
 | Problem                                    | Fix                                                               |
 |--------------------------------------------|-------------------------------------------------------------------|
 | `specter` is not recognized                | activate the virtual environment, or run `python -m specter`      |
+| `error: externally-managed-environment`    | use the Linux install script, which uses a virtual environment    |
+| `git clone` asks for a username            | the repo is private. Log in with `gh auth login` or ask for access |
+| API shows `wayback: ReadTimeout`           | the Wayback Machine is slow. Run the sweep again later            |
 | CT-LOGS fails or times out                 | crt.sh is overloaded. Run the sweep again in a few minutes        |
 | RDAP says "no RDAP record found"           | the TLD does not offer RDAP. Use a normal WHOIS tool for it       |
 | DNS says NXDOMAIN                          | check the spelling. The domain does not exist                     |
@@ -396,7 +503,7 @@ Specter/
     __init__.py      version and author
     __main__.py      command-line entry point (argparse)
     app.py           Textual UI, scope gate, scan orchestration, renderers
-    recon.py         the six recon modules and input normalization
+    recon.py         the seven recon modules and input normalization
     signals.py       rules that turn raw intel into ranked findings
     report.py        Markdown and JSON export
     specter.tcss     the green-on-black theme

@@ -61,14 +61,14 @@ TAGLINES = [
 
 BOOT_LINES = [
     ("[*] booting SPECTER v0.1 ... made by CyberRaavan", DIM),
-    ("[*] modules: dns rdap tls http ct-logs well-known", DIM),
+    ("[*] modules: dns rdap tls http ct-logs well-known api", DIM),
     ("[*] mode PASSIVE // no exploitation, no brute force, no port scans", DIM),
     ("[!] every target must be inside an authorized scope", AMBER),
     ("[+] hello, friend.", RED),
     ("[>] enter a target domain and hit EXECUTE", GREEN),
 ]
 
-MODULES = ("dns", "rdap", "tls", "http", "ct", "wellknown")
+MODULES = ("dns", "rdap", "tls", "http", "ct", "wellknown", "api")
 MODULE_LABELS = {
     "dns": "DNS",
     "rdap": "RDAP",
@@ -76,6 +76,7 @@ MODULE_LABELS = {
     "http": "HTTP",
     "ct": "CT-LOGS",
     "wellknown": "WELL-KNOWN",
+    "api": "API",
 }
 TABLE_COLUMNS = {
     "signals": ("SEV", "SIGNAL", "DETAIL"),
@@ -84,7 +85,9 @@ TABLE_COLUMNS = {
     "tls": ("FIELD", "VALUE"),
     "http": ("FIELD", "VALUE"),
     "ct": ("#", "HOSTNAME", "CERTS"),
+    "api": ("SOURCE", "ITEM", "DETAIL"),
 }
+API_ROW_LIMIT = 300
 SEVERITY_STYLE = {"high": f"bold {RED}", "medium": f"bold {AMBER}", "low": "#d7ff00", "info": MID}
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -105,7 +108,20 @@ def summarize(name: str, data) -> str:
         return f"{data['status']} at {data['final_url']}"
     if name == "ct":
         return f"{len(data)} unique hostnames"
-    found = [path for path, entry in data.items() if entry.get("body")]
+    if name == "api":
+        specs = data.get("specs") or []
+        parts = [
+            f"{len(specs)} specs ({sum(len(s['endpoints']) for s in specs)} endpoints)",
+            f"{len(data.get('docs_ui') or [])} docs UIs",
+            f"{len(data.get('graphql') or [])} GraphQL",
+            f"OIDC {'yes' if data.get('oidc') else 'no'}",
+            f"{len((data.get('javascript') or {}).get('paths', []))} JS paths",
+            f"{len(data.get('wayback') or [])} archived",
+        ]
+        if data.get("errors"):
+            parts.append("partial: " + ", ".join(data["errors"]))
+        return ", ".join(parts)
+    found =[path for path, entry in data.items() if entry.get("body")]
     return "found " + ", ".join(found) if found else "nothing published"
 
 
@@ -171,7 +187,8 @@ class AuthGate(ModalScreen[bool]):
                     "\n\n",
                     (
                         "SPECTER queries public sources (DNS, RDAP, certificate transparency) "
-                        "and makes one TLS handshake plus a few ordinary GET requests to the target.\n\n",
+                        "and makes one TLS handshake plus about 25 ordinary GET requests to the target "
+                        "(homepage, well-known files, common API doc paths, a few same-site scripts).\n\n",
                         GREEN,
                     ),
                     ("Confirm this domain is inside an authorized engagement scope.", f"bold {AMBER}"),
@@ -237,6 +254,8 @@ class Specter(App):
                     yield DataTable(id="ct", cursor_type="row")
                 with TabPane("WELL-KNOWN", id="tab-wellknown"):
                     yield RichLog(id="wellknown", wrap=True)
+                with TabPane("API", id="tab-api"):
+                    yield DataTable(id="api", cursor_type="row")
             yield RichLog(id="opslog", wrap=True)
         yield Footer()
 
@@ -364,6 +383,7 @@ class Specter(App):
                 "http": recon.http_probe(client, domain),
                 "ct": recon.ct_subdomains(client, domain),
                 "wellknown": recon.well_known(client, domain),
+                "api": recon.api_recon(client, domain),
             }
             tasks = [asyncio.create_task(guarded(n, c)) for n, c in jobs.items()]
             try:
@@ -483,6 +503,33 @@ class Specter(App):
             else:
                 log.write(Text(f"   not published (HTTP {entry['status']})", style=DIM))
             log.write("")
+
+    def _render_api(self, data: dict) -> None:
+        hot = f"bold {RED}"
+        rows = []
+        for spec in data.get("specs") or []:
+            title = " ".join(filter(None, (spec["title"], spec["api_version"]))) or "untitled"
+            rows.append((Text("SPEC", style=hot), Text(spec["path"], style=hot), f"{title} / OpenAPI {spec['spec_version']}"))
+            rows += [("SPEC", "server", url) for url in spec["servers"]]
+            rows.append(("SPEC", "auth", ", ".join(spec["auth"]) or Text("no security schemes declared", style=AMBER)))
+            rows += [("ENDPOINT", f"{e['method']} {e['path']}", e["summary"]) for e in spec["endpoints"]]
+        for ui in data.get("docs_ui") or []:
+            rows.append((Text("DOCS-UI", style=hot), Text(ui["path"], style=hot), f"{ui['kind']} at {ui['final_url']}"))
+        for gql in data.get("graphql") or []:
+            rows.append((Text("GRAPHQL", style=hot), Text(gql["path"], style=hot), f"{gql['kind']} (HTTP {gql['status']})"))
+        if oidc := data.get("oidc"):
+            rows += [("OIDC", key, str(value)) for key, value in oidc.items() if key != "grant_types"]
+            if oidc.get("grant_types"):
+                rows.append(("OIDC", "grant_types", ", ".join(oidc["grant_types"])))
+        js = data.get("javascript") or {}
+        rows += [("JS", item["path"], item["source"]) for item in js.get("paths", [])]
+        rows += [("ARCHIVE", url, "web.archive.org") for url in data.get("wayback") or []]
+        for name, error in (data.get("errors") or {}).items():
+            rows.append((Text("ERROR", style=AMBER), name, error))
+        if len(rows) > API_ROW_LIMIT:
+            extra = len(rows) - API_ROW_LIMIT
+            rows = rows[:API_ROW_LIMIT] + [("--", f"... +{extra} more rows", "full list in the saved report")]
+        self._fill("api", rows or [("--", "no API surface found", "")])
 
     # ------------------------------------------------------------ actions
 
