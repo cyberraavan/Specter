@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
+import ipaddress
 import json
 import re
+import socket
 import ssl
 from collections import Counter
 from datetime import datetime, timezone
@@ -21,6 +23,7 @@ import dns.asyncresolver
 import dns.exception
 import dns.resolver
 import httpx
+from publicsuffix2 import get_sld
 
 USER_AGENT = "Mozilla/5.0 (compatible; SPECTER-recon/0.1; passive OSINT)"
 RECORD_TYPES = ("A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "CAA")
@@ -34,6 +37,7 @@ SECURITY_HEADERS = (
 )
 WELL_KNOWN_PATHS = ("/.well-known/security.txt", "/robots.txt")
 BODY_LIMIT = 512 * 1024
+MAX_REDIRECTS = 5
 
 _LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
 
@@ -65,8 +69,76 @@ def make_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         headers={"User-Agent": USER_AGENT},
         timeout=httpx.Timeout(10.0, connect=5.0),
+        # Target-bound requests implement redirects explicitly below so a
+        # scoped scan cannot silently leave its authorized hostname.
         follow_redirects=True,
+        limits=httpx.Limits(max_connections=12, max_keepalive_connections=6),
     )
+
+
+class ScopeViolation(httpx.HTTPError):
+    """A target request attempted to leave the explicitly authorized host."""
+
+
+def _organization_domain(domain: str) -> str:
+    """Return the registrable domain using the bundled Public Suffix List."""
+    return (get_sld(domain, strict=False) or domain).lower()
+
+
+def _scope_hosts(domain: str) -> set[str]:
+    """Return the smallest practical web scope for an authorized target.
+
+    An apex domain and its conventional ``www`` host commonly redirect to one
+    another. Treat them as one scope only when the user entered that
+    registrable domain. A specific subdomain remains an exact-host scope.
+    """
+    org_domain = _organization_domain(domain)
+    if domain in {org_domain, f"www.{org_domain}"}:
+        return {org_domain, f"www.{org_domain}"}
+    return {domain}
+
+
+async def _assert_public_scoped_url(url: str | httpx.URL, domain: str) -> None:
+    """Reject cross-host, non-web, and obvious private-network requests.
+
+    This is a defence-in-depth check for user-supplied targets and redirects.
+    The hostname check permits only the entered hostname, except for the
+    conventional apex/www pair when the entered target is the registrable
+    domain. It never permits arbitrary sibling or child subdomains.
+    """
+    parsed = httpx.URL(url)
+    host = (parsed.host or "").rstrip(".").lower()
+    if parsed.scheme not in {"http", "https"} or host not in _scope_hosts(domain):
+        raise ScopeViolation(f"blocked out-of-scope redirect to {parsed!s}")
+    try:
+        addresses = await asyncio.get_running_loop().run_in_executor(
+            None, socket.getaddrinfo, host, parsed.port or (443 if parsed.scheme == "https" else 80),
+        )
+    except socket.gaierror as exc:
+        raise ScopeViolation(f"could not resolve scoped host {host}") from exc
+    resolved = {entry[4][0] for entry in addresses}
+    if not resolved or any(not ipaddress.ip_address(address).is_global for address in resolved):
+        raise ScopeViolation(f"blocked non-public address for scoped host {host}")
+
+
+async def _target_response(
+    client: httpx.AsyncClient, url: str, domain: str
+) -> tuple[httpx.Response, list[str]]:
+    """Issue a bounded GET while retaining the stream and enforcing scope."""
+    current = str(url)
+    redirects: list[str] = []
+    for _ in range(MAX_REDIRECTS + 1):
+        await _assert_public_scoped_url(current, domain)
+        request = client.build_request("GET", current)
+        response = await client.send(request, stream=True, follow_redirects=False)
+        if response.is_redirect and response.headers.get("location"):
+            redirects.append(str(response.url))
+            next_url = str(response.url.join(response.headers["location"]))
+            await response.aclose()
+            current = next_url
+            continue
+        return response, redirects
+    raise ScopeViolation(f"blocked redirect chain longer than {MAX_REDIRECTS} hops")
 
 
 # --------------------------------------------------------------------- DNS
@@ -102,13 +174,30 @@ async def dns_records(domain: str) -> dict:
             return []
         return sorted(record.to_text() for record in answer)
 
+    org_domain = _organization_domain(domain)
     values = await asyncio.gather(
         *(query(domain, rtype) for rtype in RECORD_TYPES),
         query(f"_dmarc.{domain}", "TXT"),
+        query(f"_dmarc.{org_domain}", "TXT") if org_domain != domain else asyncio.sleep(0, result=[]),
+        query(f"_mta-sts.{domain}", "TXT"),
+        query(f"_smtp._tls.{domain}", "TXT"),
+        query(f"default._bimi.{domain}", "TXT"),
     )
-    records = dict(zip(RECORD_TYPES, values[:-1], strict=True))
+    record_count = len(RECORD_TYPES)
+    records = dict(zip(RECORD_TYPES, values[:record_count], strict=True))
     records["TXT"] = [_join_txt(v) for v in records["TXT"]]
-    return {"records": records, "dmarc": [_join_txt(v) for v in values[-1]]}
+    exact_dmarc = [_join_txt(v) for v in values[record_count]]
+    org_dmarc = [_join_txt(v) for v in values[record_count + 1]]
+    return {
+        "records": records,
+        "dmarc": exact_dmarc or org_dmarc,
+        "dmarc_query": domain,
+        "dmarc_source": domain if exact_dmarc else (org_domain if org_dmarc else None),
+        "organization_domain": org_domain,
+        "mta_sts": [_join_txt(v) for v in values[record_count + 2]],
+        "tls_rpt": [_join_txt(v) for v in values[record_count + 3]],
+        "bimi": [_join_txt(v) for v in values[record_count + 4]],
+    }
 
 
 # -------------------------------------------------------------------- RDAP
@@ -180,15 +269,35 @@ def _cert_time(value: str | None) -> datetime | None:
 
 async def tls_certificate(domain: str, port: int = 443) -> dict:
     context = ssl.create_default_context()
-    _, writer = await asyncio.wait_for(
-        asyncio.open_connection(domain, port, ssl=context, server_hostname=domain),
-        timeout=8,
-    )
+    context.set_alpn_protocols(["h2", "http/1.1"])
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(domain, port, ssl=context, server_hostname=domain), timeout=8
+        )
+    except ssl.SSLCertVerificationError as exc:
+        # Do not make an unverified retry: that would add target traffic and
+        # CPython intentionally withholds parsed peer fields in CERT_NONE mode.
+        # The validation failure itself is the actionable evidence.
+        return {
+            "subject_cn": None,
+            "issuer_cn": None,
+            "issuer_org": None,
+            "not_before": None,
+            "not_after": None,
+            "days_left": None,
+            "protocol": None,
+            "alpn": None,
+            "cipher": None,
+            "serial": None,
+            "sans": [],
+            "verification_error": str(exc) or exc.__class__.__name__,
+        }
     try:
         cert = writer.get_extra_info("peercert") or {}
         cipher = writer.get_extra_info("cipher")
         ssl_object = writer.get_extra_info("ssl_object")
         protocol = ssl_object.version() if ssl_object else None
+        alpn = ssl_object.selected_alpn_protocol() if ssl_object else None
     finally:
         writer.close()
         with contextlib.suppress(Exception):
@@ -207,9 +316,11 @@ async def tls_certificate(domain: str, port: int = 443) -> dict:
         "not_after": not_after.isoformat() if not_after else None,
         "days_left": days_left,
         "protocol": protocol,
+        "alpn": alpn,
         "cipher": cipher[0] if cipher else None,
         "serial": cert.get("serialNumber"),
         "sans": [v for k, v in cert.get("subjectAltName", ()) if k == "DNS"],
+        "verification_error": None,
     }
 
 
@@ -282,6 +393,31 @@ def _fingerprint(headers: httpx.Headers, cookies: list[str], body: str) -> list[
     return found
 
 
+def _cookie_posture(set_cookies: list[str]) -> list[dict]:
+    """Extract security-relevant Set-Cookie attributes without retaining values."""
+    parsed: list[dict] = []
+    for raw in set_cookies:
+        parts = [part.strip() for part in raw.split(";")]
+        if not parts or "=" not in parts[0]:
+            continue
+        name = parts[0].split("=", 1)[0].strip()
+        attributes: dict[str, str | bool] = {}
+        for part in parts[1:]:
+            key, _, value = part.partition("=")
+            attributes[key.strip().lower()] = value.strip() if value else True
+        parsed.append(
+            {
+                "name": name,
+                "secure": bool(attributes.get("secure")),
+                "http_only": bool(attributes.get("httponly")),
+                "same_site": str(attributes.get("samesite") or "").lower() or None,
+                "domain": str(attributes.get("domain") or "") or None,
+                "path": str(attributes.get("path") or "") or None,
+            }
+        )
+    return parsed
+
+
 async def _read_capped(response: httpx.Response, limit: int) -> str:
     chunks, size = [], 0
     async for chunk in response.aiter_bytes():
@@ -301,31 +437,36 @@ async def http_probe(client: httpx.AsyncClient, domain: str) -> dict:
     for scheme in ("https", "http"):
         url = f"{scheme}://{domain}/"
         try:
-            async with client.stream("GET", url) as response:
+            response, redirects = await _target_response(client, url, domain)
+            try:
                 body = await _read_capped(response, BODY_LIMIT)
+                headers = response.headers
+                raw_cookies = headers.get_list("set-cookie")
+                cookies = [c.split("=", 1)[0].strip() for c in raw_cookies]
+                title = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
+                return {
+                    "url": url,
+                    "final_url": str(response.url),
+                    "status": response.status_code,
+                    "reason": response.reason_phrase,
+                    "redirects": redirects,
+                    "title": " ".join(html.unescape(title.group(1)).split())[:120] if title else None,
+                    "server": headers.get("server"),
+                    "powered_by": headers.get("x-powered-by"),
+                    "security_headers": {h: headers.get(h) for h in SECURITY_HEADERS},
+                    "cookies": cookies,
+                    "cookie_security": _cookie_posture(raw_cookies),
+                    "tech": _fingerprint(headers, cookies, body),
+                    "headers": {k.lower(): v for k, v in headers.items()},
+                    "https_error": https_error,
+                }
+            finally:
+                await response.aclose()
         except httpx.HTTPError as exc:
             if scheme == "https":
                 https_error = str(exc) or exc.__class__.__name__
                 continue
             raise
-        headers = response.headers
-        cookies = [c.split("=", 1)[0].strip() for c in headers.get_list("set-cookie")]
-        title = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
-        return {
-            "url": url,
-            "final_url": str(response.url),
-            "status": response.status_code,
-            "reason": response.reason_phrase,
-            "redirects": [str(hop.url) for hop in response.history],
-            "title": " ".join(html.unescape(title.group(1)).split())[:120] if title else None,
-            "server": headers.get("server"),
-            "powered_by": headers.get("x-powered-by"),
-            "security_headers": {h: headers.get(h) for h in SECURITY_HEADERS},
-            "cookies": cookies,
-            "tech": _fingerprint(headers, cookies, body),
-            "headers": {k.lower(): v for k, v in headers.items()},
-            "https_error": https_error,
-        }
     raise RuntimeError("unreachable")
 
 
@@ -372,11 +513,14 @@ async def well_known(client: httpx.AsyncClient, domain: str) -> dict:
     for path in WELL_KNOWN_PATHS:
         entry: dict = {"status": None, "body": None}
         try:
-            response = await client.get(f"https://{domain}{path}")
-            entry["status"] = response.status_code
-            content_type = response.headers.get("content-type", "").lower()
-            if response.status_code == 200 and "html" not in content_type:
-                entry["body"] = response.text[:6000]
+            response, _ = await _target_response(client, f"https://{domain}{path}", domain)
+            try:
+                entry["status"] = response.status_code
+                content_type = response.headers.get("content-type", "").lower()
+                if response.status_code == 200 and "html" not in content_type:
+                    entry["body"] = (await _read_capped(response, 6000))[:6000]
+            finally:
+                await response.aclose()
         except httpx.HTTPError as exc:
             entry["error"] = str(exc) or exc.__class__.__name__
         found[path] = entry
@@ -433,10 +577,15 @@ _SCRIPT_SRC = re.compile(r"""<script[^>]+src=["']([^"']+)["']""", re.I)
 _WAYBACK_FILTER = r"original:.*(/api/|/v[0-9]+/|graphql|swagger|openapi|api-docs).*"
 
 
-async def _get_text(client: httpx.AsyncClient, url: str, limit: int) -> tuple[httpx.Response, str]:
-    async with client.stream("GET", url) as response:
+async def _get_text(
+    client: httpx.AsyncClient, url: str, limit: int, domain: str
+) -> tuple[httpx.Response, str]:
+    response, _ = await _target_response(client, url, domain)
+    try:
         body = await _read_capped(response, limit)
-    return response, body
+        return response, body
+    finally:
+        await response.aclose()
 
 
 def _parse_spec(data: dict) -> dict | None:
@@ -445,12 +594,18 @@ def _parse_spec(data: dict) -> dict | None:
         return None
     info = data.get("info") or {}
     endpoints = []
+    protected_operations = 0
+    document_security = data.get("security", [])
     for path, ops in data["paths"].items():
         if not isinstance(ops, dict):
             continue
         for method in HTTP_METHODS:
             if method in ops:
                 op = ops[method] if isinstance(ops[method], dict) else {}
+                # An empty operation-level security array explicitly means
+                # anonymous access; otherwise inherit document-level security.
+                if op.get("security", document_security):
+                    protected_operations += 1
                 endpoints.append(
                     {"method": method.upper(), "path": path, "summary": str(op.get("summary") or "")[:80]}
                 )
@@ -464,15 +619,17 @@ def _parse_spec(data: dict) -> dict | None:
         "api_version": info.get("version"),
         "servers": servers,
         "auth": sorted(f"{name} ({(s or {}).get('type', '?')})" for name, s in schemes.items()),
+        "operations_total": len(endpoints),
+        "protected_operations": protected_operations,
         "endpoints": endpoints,
     }
 
 
-async def _probe_specs(client: httpx.AsyncClient, base: str) -> list[dict]:
+async def _probe_specs(client: httpx.AsyncClient, base: str, domain: str) -> list[dict]:
     found = []
     for path in SPEC_PATHS:
         try:
-            response, body = await _get_text(client, base + path, SPEC_LIMIT)
+            response, body = await _get_text(client, base + path, SPEC_LIMIT, domain)
         except httpx.HTTPError:
             continue
         if response.status_code != 200:
@@ -488,11 +645,11 @@ async def _probe_specs(client: httpx.AsyncClient, base: str) -> list[dict]:
     return found
 
 
-async def _probe_docs_ui(client: httpx.AsyncClient, base: str) -> list[dict]:
+async def _probe_docs_ui(client: httpx.AsyncClient, base: str, domain: str) -> list[dict]:
     found = []
     for path in DOCS_UI_PATHS:
         try:
-            response, body = await _get_text(client, base + path, BODY_LIMIT)
+            response, body = await _get_text(client, base + path, BODY_LIMIT, domain)
         except httpx.HTTPError:
             continue
         if response.status_code != 200:
@@ -505,11 +662,11 @@ async def _probe_docs_ui(client: httpx.AsyncClient, base: str) -> list[dict]:
     return found
 
 
-async def _probe_graphql(client: httpx.AsyncClient, base: str) -> list[dict]:
+async def _probe_graphql(client: httpx.AsyncClient, base: str, domain: str) -> list[dict]:
     found = []
     for path in GRAPHQL_PATHS:
         try:
-            response, body = await _get_text(client, base + path, BODY_LIMIT)
+            response, body = await _get_text(client, base + path, BODY_LIMIT, domain)
         except httpx.HTTPError:
             continue
         if response.status_code == 404:
@@ -532,9 +689,9 @@ async def _probe_graphql(client: httpx.AsyncClient, base: str) -> list[dict]:
     return found
 
 
-async def _probe_oidc(client: httpx.AsyncClient, base: str) -> dict | None:
+async def _probe_oidc(client: httpx.AsyncClient, base: str, domain: str) -> dict | None:
     try:
-        response, body = await _get_text(client, base + OIDC_PATH, BODY_LIMIT)
+        response, body = await _get_text(client, base + OIDC_PATH, BODY_LIMIT, domain)
         data = json.loads(body) if response.status_code == 200 else None
     except (httpx.HTTPError, ValueError):
         return None
@@ -567,7 +724,7 @@ def _api_paths(text: str, domain: str) -> set[str]:
 
 
 async def _scan_javascript(client: httpx.AsyncClient, base: str, domain: str) -> dict:
-    response, page = await _get_text(client, base + "/", BODY_LIMIT)
+    response, page = await _get_text(client, base + "/", BODY_LIMIT, domain)
     page_url = str(response.url)
     page_host = urlsplit(page_url).hostname or ""
     paths = {p: "homepage" for p in _api_paths(page, domain)}
@@ -575,13 +732,13 @@ async def _scan_javascript(client: httpx.AsyncClient, base: str, domain: str) ->
     for src in _SCRIPT_SRC.findall(page):
         url = str(httpx.URL(page_url).join(html.unescape(src)))
         host = urlsplit(url).hostname or ""
-        same_site = host in (page_host, domain) or host.endswith("." + domain)
+        same_site = host == page_host and host in _scope_hosts(domain)
         if same_site and url not in scripts:
             scripts.append(url)
     scripts = scripts[:MAX_SCRIPTS]
     for url in scripts:
         try:
-            _, body = await _get_text(client, url, JS_LIMIT)
+            _, body = await _get_text(client, url, JS_LIMIT, domain)
         except httpx.HTTPError:
             continue
         name = urlsplit(url).path.rsplit("/", 1)[-1] or url
@@ -626,10 +783,10 @@ async def api_recon(client: httpx.AsyncClient, domain: str) -> dict:
     """Map API surface: published specs, docs UIs, GraphQL, OIDC, JS references, archived URLs."""
     base = f"https://{domain}"
     checks = {
-        "specs": _probe_specs(client, base),
-        "docs_ui": _probe_docs_ui(client, base),
-        "graphql": _probe_graphql(client, base),
-        "oidc": _probe_oidc(client, base),
+        "specs": _probe_specs(client, base, domain),
+        "docs_ui": _probe_docs_ui(client, base, domain),
+        "graphql": _probe_graphql(client, base, domain),
+        "oidc": _probe_oidc(client, base, domain),
         "javascript": _scan_javascript(client, base, domain),
         "wayback": _wayback_api(client, domain),
     }

@@ -426,7 +426,12 @@ class Specter(App):
             for rtype, values in data["records"].items()
             for value in values
         ]
-        rows += [(Text("DMARC", style=f"bold {RED}"), value) for value in data["dmarc"]]
+        source = data.get("dmarc_source")
+        label = f"DMARC ({source})" if source else "DMARC"
+        rows += [(Text(label, style=f"bold {RED}"), value) for value in data["dmarc"]]
+        rows += [("MTA-STS", value) for value in data.get("mta_sts", [])]
+        rows += [("TLS-RPT", value) for value in data.get("tls_rpt", [])]
+        rows += [("BIMI", value) for value in data.get("bimi", [])]
         self._fill("dns", rows or [("--", "no records returned")])
 
     def _render_rdap(self, data: dict) -> None:
@@ -454,6 +459,7 @@ class Specter(App):
             ("Valid until", data["not_after"]),
             ("Days left", Text(str(days), style=f"bold {days_style}")),
             ("Protocol", data["protocol"]),
+            ("ALPN", data.get("alpn")),
             ("Cipher", data["cipher"]),
             ("Serial", data["serial"]),
         ]
@@ -481,6 +487,14 @@ class Specter(App):
             rows.append((header, cell))
         rows += [("Tech", tech) for tech in data["tech"]]
         rows += [("Cookie", cookie) for cookie in data["cookies"]]
+        for cookie in data.get("cookie_security", []):
+            attrs = [
+                "Secure" if cookie.get("secure") else "no Secure",
+                "HttpOnly" if cookie.get("http_only") else "no HttpOnly",
+            ]
+            if cookie.get("same_site"):
+                attrs.append(f"SameSite={cookie['same_site']}")
+            rows.append((f"Cookie policy: {cookie['name']}", "; ".join(attrs)))
         self._fill("http", rows)
 
     def _render_ct(self, data: list) -> None:
@@ -516,7 +530,13 @@ class Specter(App):
             rows.append(("SPEC", "auth", ", ".join(spec["auth"]) or Text("no security schemes declared", style=AMBER)))
             rows += [("ENDPOINT", f"{e['method']} {e['path']}", e["summary"]) for e in spec["endpoints"]]
         for ui in data.get("docs_ui") or []:
-            rows.append((Text("DOCS-UI", style=hot), Text(ui["path"], style=hot), f"{ui['kind']} at {ui['final_url']}"))
+            rows.append(
+                (
+                    Text("DOCS-UI", style=hot),
+                    Text(ui["path"], style=hot),
+                    f"{ui['kind']} at {ui['final_url']}",
+                )
+            )
         for gql in data.get("graphql") or []:
             detail = f"{gql['kind']} (HTTP {gql['status']})"
             rows.append((Text("GRAPHQL", style=hot), Text(gql["path"], style=hot), detail))

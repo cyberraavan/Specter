@@ -58,7 +58,11 @@ def to_markdown(target: str, intel: dict, failures: dict, signals: list[dict], m
         out += ["", "## DNS", ""]
         for rtype, values in dns["records"].items():
             out += [f"- **{rtype}**: `{v}`" for v in values]
-        out += [f"- **DMARC**: `{v}`" for v in dns["dmarc"]]
+        dmarc_label = f"DMARC (source: {dns['dmarc_source']})" if dns.get("dmarc_source") else "DMARC"
+        out += [f"- **{dmarc_label}**: `{v}`" for v in dns["dmarc"]]
+        out += [f"- **MTA-STS**: `{v}`" for v in dns.get("mta_sts", [])]
+        out += [f"- **TLS-RPT**: `{v}`" for v in dns.get("tls_rpt", [])]
+        out += [f"- **BIMI**: `{v}`" for v in dns.get("bimi", [])]
 
     for key, title in (("rdap", "Registration (RDAP)"), ("tls", "TLS certificate")):
         if data := intel.get(key):
@@ -75,6 +79,13 @@ def to_markdown(target: str, intel: dict, failures: dict, signals: list[dict], m
         out.append(f"- **tech**: {', '.join(http['tech']) or '-'}")
         out += ["", "| Security header | Value |", "|---|---|"]
         out += [f"| {h} | {_cell(v or 'MISSING')} |" for h, v in http["security_headers"].items()]
+        if cookies := http.get("cookie_security"):
+            out += ["", "| Cookie | Secure | HttpOnly | SameSite |", "|---|---|---|---|"]
+            out += [
+                f"| {_cell(cookie['name'])} | {cookie.get('secure', False)} | "
+                f"{cookie.get('http_only', False)} | {_cell(cookie.get('same_site'))} |"
+                for cookie in cookies
+            ]
 
     if (ct := intel.get("ct")) is not None:
         out += ["", f"## Certificate transparency ({len(ct)} hostnames)", "", "```"]

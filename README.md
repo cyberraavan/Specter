@@ -13,7 +13,7 @@
 
 **Made by CyberRaavan**
 
-SPECTER is a **passive recon console** for the first hours of an **authorized**
+SPECTER is a **low-touch recon console** for the first hours of an **authorized**
 red team engagement or security assessment. You give it a domain. It runs seven
 intel modules at the same time, shows the raw results in tabs, and turns them
 into ranked **signals**: the findings worth looking at first.
@@ -166,10 +166,12 @@ or at domains you own.
 - Pressing **ABORT** or `Esc` cancels the scan, and nothing is sent.
 
 SPECTER is low-touch by design. It does **no** port scanning, brute forcing,
-fuzzing, directory busting, or exploitation. The target sees one TLS
-handshake and about 25 ordinary GET requests: the homepage, two well-known
-files, a fixed list of common API documentation paths, and up to 5 of its own
-script files.
+fuzzing, directory busting, or exploitation. It does perform bounded HTTP
+content discovery: up to about 28 ordinary GET requests to the explicitly
+authorized target scope (the homepage, two well-known files, common API-documentation
+paths, and up to 5 of its own script files). For an apex domain, its conventional
+`www` host is also in scope; all other hosts, private/reserved IP destinations,
+and chains longer than five hops are blocked.
 
 ---
 
@@ -177,19 +179,19 @@ script files.
 
 | Module     | Talks to                 | What it collects                                  |
 |------------|--------------------------|---------------------------------------------------|
-| DNS        | your system resolver     | A, AAAA, CNAME, MX, NS, TXT, SOA, CAA, and DMARC  |
+| DNS        | your system resolver     | DNS records, SPF/DMARC, MTA-STS, TLS-RPT, and BIMI |
 | RDAP       | rdap.org (registries)    | registrar, dates, status, nameservers, DNSSEC     |
 | CT-LOGS    | crt.sh                   | hostnames seen in certificate transparency logs   |
-| TLS        | target, port 443         | one handshake: issuer, expiry, SANs, protocol     |
-| HTTP       | target                   | one GET of `/`: headers, title, tech fingerprint  |
+| TLS        | target, port 443         | issuer, expiry, SANs, protocol, cipher, and ALPN  |
+| HTTP       | target                   | headers, title, tech fingerprint, cookie posture  |
 | WELL-KNOWN | target                   | `/.well-known/security.txt` and `/robots.txt`     |
 | API        | target, web.archive.org  | API specs, docs UIs, GraphQL, OIDC, JS API paths, archived API URLs |
 
 Then the **signals engine** reads all of that and flags things like:
 
-- weak email spoofing protection (SPF and DMARC),
+- weak email and SMTP-transport posture (SPF, DMARC, MTA-STS and TLS-RPT),
 - expired or soon-expiring TLS certificates,
-- missing HSTS and other security headers,
+- missing or weak HSTS/CSP and insecure cookie attributes,
 - version banners that leak the server stack,
 - interesting subdomains such as `dev`, `staging`, `vpn`, `jenkins`, `admin`,
 - exposed API documentation, Swagger or OpenAPI specs, and GraphQL IDEs.
@@ -227,8 +229,10 @@ Step by step:
 2. **Scope gate.** A modal asks you to confirm the domain is inside an
    authorized scope. Only after that does any network traffic start.
 3. **Parallel sweep.** All seven modules start at once as async tasks. One
-   shared HTTP client is used, with a 10 second timeout and the user agent
-   `SPECTER-recon/0.1`.
+   shared HTTP client is used, with a 10 second timeout, a bounded connection
+   pool, and the user agent `SPECTER-recon/0.1`. Target-bound redirects allow
+   only the authorized hostname (or its apex/`www` pair for an apex target);
+   non-public destinations and chains longer than five hops are blocked.
 4. **Live results.** As each module finishes, its tab is filled, the status
    bar updates, and a line is written to the OPS LOG. If a module fails, the
    others keep running and the error is shown in red.
@@ -306,10 +310,10 @@ box-drawing characters, such as Windows Terminal with Cascadia Mono.
 | Tab        | What you see                                                       |
 |------------|--------------------------------------------------------------------|
 | SIGNALS    | ranked findings with severity, title, and detail                   |
-| DNS        | every record type, plus the DMARC record                           |
+| DNS        | every record type, DMARC source, MTA-STS, TLS-RPT and BIMI         |
 | RDAP       | registrar, created, expires, updated, status, nameservers, DNSSEC  |
-| TLS        | subject, issuer, validity dates, days left, protocol, cipher, SANs |
-| HTTP       | status, redirects, title, server, security headers, cookies, tech  |
+| TLS        | subject, issuer, validity dates, protocol, cipher, ALPN and SANs   |
+| HTTP       | status, redirects, headers, cookie attributes and tech fingerprint |
 | CT-LOGS    | every hostname from crt.sh. Notable ones are shown in red          |
 | WELL-KNOWN | the contents of `security.txt` and `robots.txt`, if published      |
 | API        | specs and their endpoints, docs UIs, GraphQL, OIDC, JS and archived API paths |
@@ -325,8 +329,11 @@ Severity colours: **HIGH** red, **MEDIUM** amber, **LOW** yellow-green,
 
 - Uses your system resolver. If none is configured, it falls back to
   `1.1.1.1` and `8.8.8.8`.
-- Queries A, AAAA, CNAME, MX, NS, TXT, SOA and CAA for the domain, and TXT for
-  `_dmarc.<domain>`.
+- Queries A, AAAA, CNAME, MX, NS, TXT, SOA and CAA for the domain; and TXT
+  for DMARC, MTA-STS, TLS-RPT and BIMI.
+- DMARC organizational-domain fallback uses the Public Suffix List. When a
+  parent record supplies policy for a subdomain, its source is shown explicitly
+  and the `sp=` policy is honored.
 - Split TXT strings are joined, so a long SPF record shows as one line.
 - If the domain does not exist, the module fails with `NXDOMAIN`.
 
@@ -342,18 +349,26 @@ Severity colours: **HIGH** red, **MEDIUM** amber, **LOW** yellow-green,
 ### TLS
 
 - Opens one TLS connection to port 443 with normal certificate verification.
+  If validation fails, it does not retry insecurely; the verification failure
+  itself is retained as high-severity evidence.
 - Reads the certificate subject, issuer, validity dates, serial number,
-  Subject Alternative Names, protocol version and cipher.
+  Subject Alternative Names, protocol version, negotiated cipher and ALPN.
 - If verification fails, that itself becomes a **HIGH** signal.
 
 ### HTTP
 
 - Sends one `GET /` over HTTPS. If HTTPS fails, it tries plain HTTP and
   raises a signal about it.
-- Follows redirects and records the redirect chain.
+- Follows only in-scope redirects and records the redirect chain. For an apex
+  target, its conventional `www` host is included; redirects to any other
+  host, non-public addresses, or more than five hops are blocked.
 - Reads at most 512 KB of the page body.
 - Collects the status, page title, `Server` and `X-Powered-By` headers, six
-  security headers, and cookie names.
+  security headers, cookie names, and cookie `Secure`/`HttpOnly`/`SameSite`
+  attributes. Missing-header findings are suppressed on HTTP error responses.
+- Evaluates HSTS duration and CSP directives such as `frame-ancestors`,
+  `unsafe-inline`, `unsafe-eval`, and `object-src`; these are posture signals,
+  not exploit claims.
 - **Tech fingerprint** comes from three places:
   - headers such as `cf-ray` for Cloudflare or `x-vercel-id` for Vercel,
   - cookie names such as `PHPSESSID`, `JSESSIONID` or `laravel_session`,
@@ -429,23 +444,29 @@ The API tab shows at most 300 rows. The saved report has the full list.
 | MEDIUM   | HTTPS failed, fell back to HTTP              | site may not support TLS properly                   |
 | MEDIUM   | Site served over plain HTTP                  | traffic can be read or changed in transit           |
 | MEDIUM   | No HSTS header                               | first visit can be downgraded to HTTP               |
-| MEDIUM   | Public API specification exposed             | full endpoint map is readable by anyone             |
-| MEDIUM   | Interactive API docs exposed                 | Swagger UI or similar lets anyone try requests      |
+| MEDIUM   | Cookies missing Secure                       | cookies can be sent over an HTTP downgrade          |
 | MEDIUM   | GraphQL IDE reachable                        | GraphiQL or Playground is open to the internet      |
 | LOW      | SPF soft-fails (`~all`)                      | spoofed mail is marked, not rejected                |
+| LOW      | SPF has no terminal `all` mechanism          | unmatched senders can be evaluated inconsistently   |
 | LOW      | DMARC is monitor-only (`p=none`)             | DMARC reports but does not block                    |
+| LOW      | DMARC policy applies to less than 100%       | protection is only partially rolled out             |
 | LOW      | Missing security headers                     | CSP, X-Frame-Options and similar are absent         |
+| LOW      | HSTS is disabled or under 180 days           | downgrade protection is absent or short-lived       |
+| LOW      | CSP permits unsafe script execution          | script policy has a risky directive                 |
+| LOW      | Cookies missing HttpOnly                     | injected JavaScript may read the cookie             |
 | LOW      | Server banner discloses version              | helps match the server to known CVEs                |
 | LOW      | X-Powered-By discloses stack                 | reveals backend language or framework               |
 | LOW      | Notable hostnames exposed via CT logs        | dev, staging or admin surface is public knowledge   |
 | LOW      | GraphQL endpoint reachable                   | worth checking whether introspection is enabled     |
-| LOW      | API spec declares no auth scheme             | endpoints may be callable without credentials       |
+| LOW      | API spec declares no protected operations    | documentation indicates anonymous operations        |
 | LOW      | OIDC dynamic client registration advertised  | anyone may be able to register an OAuth client      |
 | INFO     | DMARC enforced                               | good posture, shown for context                     |
+| INFO     | MTA-STS/TLS-RPT/BIMI advertised              | email and SMTP-transport posture context            |
 | INFO     | No CAA record                                | any public CA may issue certificates                |
 | INFO     | No MX records                                | domain does not receive mail directly               |
 | INFO     | DNSSEC not enabled                           | delegation is unsigned                              |
 | INFO     | Technology fingerprint                       | detected CDN, CMS and framework                     |
+| INFO     | Public API specification or docs exposed     | inventory context; not a vulnerability by itself    |
 | INFO     | Hostnames in CT logs                         | total count, see the CT-LOGS tab                    |
 | INFO     | security.txt published or missing            | disclosure contact, or the lack of one              |
 | INFO     | robots.txt disallowed paths                  | paths the owner does not want indexed               |
@@ -469,7 +490,8 @@ reports/
 ```
 
 The **Markdown** report contains scan times, the signals table, all DNS
-records, RDAP and TLS details, HTTP headers with a security-header table, the
+records (including email-security TXT records), RDAP and TLS details, HTTP
+headers with security-header and cookie-posture tables, the
 CT hostname list, the well-known files, the full API surface with every
 endpoint and archived URL, and any module failures.
 
